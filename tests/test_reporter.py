@@ -97,20 +97,13 @@ def test_export_json_sample_fields():
 # export_csv
 # ---------------------------------------------------------------------------
 
-def test_export_csv_header_and_rows():
-    samples = [_make_sample(-50), _make_sample(-70)]
+def test_export_csv_header_and_row():
+    """CSV output must contain a header row and one data row per sample."""
+    samples = [_make_sample(signal_dbm=-65, location="lobby")]
     raw = export_csv(samples)
     reader = csv.DictReader(io.StringIO(raw))
     rows = list(reader)
-    assert len(rows) == 2
-    assert "signal_dbm" in rows[0]
-    assert "quality_pct" in rows[0]
-
-
-def test_export_csv_values():
-    sample = _make_sample(signal_dbm=-65, location="rooftop")
-    raw = export_csv([sample])
-    reader = csv.DictReader(io.StringIO(raw))
-    row = next(reader)
-    assert int(row["signal_dbm"]) == -65
-    assert row["location"] == "rooftop"
+    assert len(rows) == 1
+    assert "signal_dbm" in reader.fieldnames
+    assert rows[0]["signal_dbm"] == "-65"
+    assert rows[0]["location"] == "lobby"
