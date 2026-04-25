@@ -1,86 +1,98 @@
-"""Generate exportable reports from WiFi scan samples."""
-
+"""Report generation: summarize, export JSON/CSV, and trend summaries."""
 from __future__ import annotations
 
 import csv
-import io
 import json
-import statistics
-from datetime import datetime
-from typing import List, Optional
+from io import StringIO
+from statistics import mean
+from typing import Any, Dict, List, Optional
 
-from wifi_scout.scanner import WiFiSample, signal_quality
+from wifi_scout.scanner import WiFiSample
+from wifi_scout.trend import TrendReport, analyze
 
 
-def _sample_to_dict(sample: WiFiSample) -> dict:
+def _sample_to_dict(s: WiFiSample) -> Dict[str, Any]:
     return {
-        "timestamp": sample.timestamp.isoformat(),
-        "location": sample.location,
-        "ssid": sample.ssid,
-        "bssid": sample.bssid,
-        "signal_dbm": sample.signal_dbm,
-        "frequency_mhz": sample.frequency_mhz,
-        "quality_pct": signal_quality(sample.signal_dbm),
+        "ssid": s.ssid,
+        "bssid": s.bssid,
+        "signal_dbm": s.signal_dbm,
+        "quality": s.quality,
+        "channel": s.channel,
+        "latency_ms": s.latency_ms,
     }
 
 
-def summarize(samples: List[WiFiSample]) -> dict:
-    """Return aggregate statistics for a list of samples."""
+def summarize(samples: List[WiFiSample]) -> Dict[str, Any]:
+    """Return high-level statistics for a list of samples."""
     if not samples:
-        return {}
+        return {"count": 0, "networks": []}
 
-    signals = [s.signal_dbm for s in samples]
-    qualities = [signal_quality(s) for s in signals]
-    locations = sorted({s.location for s in samples if s.location})
-    ssids = sorted({s.ssid for s in samples})
+    by_ssid: Dict[str, List[WiFiSample]] = {}
+    for s in samples:
+        by_ssid.setdefault(s.ssid, []).append(s)
 
-    return {
-        "sample_count": len(samples),
-        "locations": locations,
-        "ssids": ssids,
-        "signal_dbm": {
-            "min": min(signals),
-            "max": max(signals),
-            "mean": round(statistics.mean(signals), 2),
-            "stdev": round(statistics.stdev(signals), 2) if len(signals) > 1 else 0.0,
-        },
-        "quality_pct": {
-            "min": min(qualities),
-            "max": max(qualities),
-            "mean": round(statistics.mean(qualities), 2),
-        },
-        "period": {
-            "start": min(s.timestamp for s in samples).isoformat(),
-            "end": max(s.timestamp for s in samples).isoformat(),
-        },
-    }
+    networks = []
+    for ssid, group in by_ssid.items():
+        signals = [s.signal_dbm for s in group]
+        latencies = [s.latency_ms for s in group if s.latency_ms is not None]
+        networks.append(
+            {
+                "ssid": ssid,
+                "samples": len(group),
+                "avg_signal_dbm": round(mean(signals), 2),
+                "min_signal_dbm": min(signals),
+                "max_signal_dbm": max(signals),
+                "avg_quality": round(mean(s.quality for s in group), 2),
+                "avg_latency_ms": round(mean(latencies), 2) if latencies else None,
+            }
+        )
+
+    return {"count": len(samples), "networks": networks}
 
 
-def export_json(
-    samples: List[WiFiSample],
-    include_summary: bool = True,
-) -> str:
-    """Serialize samples (and optional summary) to a JSON string."""
-    payload: dict = {"samples": [_sample_to_dict(s) for s in samples]}
-    if include_summary:
-        payload["summary"] = summarize(samples)
+def export_json(samples: List[WiFiSample], include_trends: bool = False) -> str:
+    """Serialize samples (and optionally trends) to a JSON string."""
+    payload: Dict[str, Any] = {"samples": [_sample_to_dict(s) for s in samples]}
+    if include_trends:
+        trends = analyze(samples)
+        payload["trends"] = [
+            {
+                "ssid": t.ssid,
+                "sample_count": t.sample_count,
+                "avg_signal": t.avg_signal,
+                "avg_quality": t.avg_quality,
+                "signal_stdev": t.signal_stdev,
+                "min_signal": t.min_signal,
+                "max_signal": t.max_signal,
+                "trend": t.trend,
+                "avg_latency_ms": t.avg_latency_ms,
+            }
+            for t in trends
+        ]
     return json.dumps(payload, indent=2)
 
 
 def export_csv(samples: List[WiFiSample]) -> str:
     """Serialize samples to a CSV string."""
-    fieldnames = [
-        "timestamp",
-        "location",
-        "ssid",
-        "bssid",
-        "signal_dbm",
-        "frequency_mhz",
-        "quality_pct",
-    ]
-    buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=fieldnames, lineterminator="\n")
+    output = StringIO()
+    fieldnames = ["ssid", "bssid", "signal_dbm", "quality", "channel", "latency_ms"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
-    for sample in samples:
-        writer.writerow(_sample_to_dict(sample))
-    return buf.getvalue()
+    for s in samples:
+        writer.writerow(_sample_to_dict(s))
+    return output.getvalue()
+
+
+def trend_summary_text(samples: List[WiFiSample]) -> str:
+    """Return a human-readable trend summary string."""
+    reports: List[TrendReport] = analyze(samples)
+    if not reports:
+        return "No trend data available."
+    lines = []
+    for r in reports:
+        latency_str = f", avg latency {r.avg_latency_ms} ms" if r.avg_latency_ms is not None else ""
+        lines.append(
+            f"{r.ssid}: {r.trend} | avg signal {r.avg_signal} dBm"
+            f" (±{r.signal_stdev}) | avg quality {r.avg_quality}%{latency_str}"
+        )
+    return "\n".join(lines)
